@@ -19,6 +19,13 @@ substitutions:
   factory_reset_cancelled_sound_file: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/${satellite_core_ref}/sounds/factory_reset_cancelled.opus
   factory_reset_confirmed_sound_file: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/${satellite_core_ref}/sounds/factory_reset_confirmed.opus
   error_cloud_expired_sound_file: https://raw.githubusercontent.com/formatBCE/Respeaker-Lite-ESPHome-integration/${satellite_core_ref}/sounds/error_cloud_expired.opus
+  # Fork (dlip9663): room name sent with esphome.bark_detected.
+  bark_room: unknown
+  # Fork (dlip9663): pause between starting the wake sound and starting the
+  # assistant. The DSP suppresses the microphone while its own speaker plays, so
+  # any part of the wake sound still playing once the assistant starts mutes the
+  # start of the command. Set it just past the length of the wake sound.
+  wake_sound_delay: 300ms
 
 api:
   actions:
@@ -94,9 +101,13 @@ micro_wake_word:
     probability_cutoff: 0.05
   on_wake_word_detected:
     # If the wake word is detected when the device is muted (Possible with the software mute switch): Do nothing
+    # Fork (dlip9663): "dog bark" is a bark-detector model, not a wake word. It
+    # only fires esphome.bark_detected (else branch) and never starts anything.
     - if:
         condition:
-          switch.is_off: mic_mute_switch
+          and:
+            - lambda: return wake_word != "dog bark";
+            - switch.is_off: mic_mute_switch
         then:
           - script.execute:
               id: send_wake_word_event
@@ -153,15 +164,25 @@ micro_wake_word:
                                       id: play_sound
                                       priority: true
                                       sound_file: "wake_word_triggered_sound"
-                                  - delay: 300ms
+                                  - delay: ${wake_sound_delay}
                             - voice_assistant.start:
                                 wake_word: !lambda return wake_word;
                             # Device hook, empty here. See the script below.
                             - script.execute: wake_word_start_hook
         else:
-          - logger.log:
-              level: INFO
-              format: "Wake word ignored: microphone is muted"
+          - if:
+              condition:
+                lambda: return wake_word == "dog bark";
+              then:
+                - homeassistant.event:
+                    event: esphome.bark_detected
+                    data:
+                      wake_word: !lambda return wake_word;
+                      room: ${bark_room}
+              else:
+                - logger.log:
+                    level: INFO
+                    format: "Wake word ignored: microphone is muted"
 
 select:
   - platform: template
@@ -222,14 +243,14 @@ voice_assistant:
     - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};
     - script.execute: control_leds
   on_error:
-    # Only set the error phase if the error code is different than duplicate_wake_up_detected or stt-no-text-recognized
-    # These two are ignored for a better user experience
+    # Only set the error phase if the error code is different than duplicate_wake_up_detected.
+    # Fork (dlip9663): stt-no-text-recognized flashes the error LEDs too, so a
+    # VAD/STT timeout is visible instead of a silent no-op.
     - if:
         condition:
           and:
             - lambda: return !id(init_in_progress);
             - lambda: return code != "duplicate_wake_up_detected";
-            - lambda: return code != "stt-no-text-recognized";
         then:
           - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id};
           - script.execute: control_leds
